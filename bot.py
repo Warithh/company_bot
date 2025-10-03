@@ -217,12 +217,46 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text("اختر قسمك 👇", reply_markup=dept_buttons())
 
-async def on_reg_buttons(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    _,_,dept = q.data.split(":")
-    cur.execute("UPDATE users SET dept=? WHERE chat_id=?", (dept, q.from_user.id)); conn.commit()
-    await q.message.reply_text(f"✅ اخترت: {DEPT_LABEL[dept]}\nاكتب الآن مسمّاك الوظيفي.")
-    ctx.user_data["awaiting_title"]=True
+async def on_reg_buttons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+
+    # جرّب نفك بيانات الزر بأمان
+    try:
+        prefix, kind, dept = q.data.split(":", 2)
+    except Exception:
+        await q.answer()
+        return
+
+    # لازم يكون النمط reg:dept:<dept>
+    if prefix != "reg" or kind != "dept" or dept not in DEPTS:
+        await q.answer("اختيار غير صالح.", show_alert=False)
+        return
+
+    await q.answer()
+
+    # ثبّت بيانات المستخدم وحدّث الدور (admin/member) حسب ADMIN_USERNAME
+    ensure_user(q.from_user)
+
+    # خزّن القسم للمستخدم
+    cur.execute("UPDATE users SET dept=? WHERE chat_id=?", (dept, q.from_user.id))
+    conn.commit()
+
+    # نظّف حالات التسجيل وابدأ طلب المسمّى
+    ctx.user_data.clear()
+    ctx.user_data["awaiting_title"] = True
+
+    # اشطب أزرار الاختيار حتى ما تتكرر الضغطات
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass
+
+    # أرسل التعليمات التالية
+    await q.message.reply_text(
+        f"✅ اخترت: {DEPT_LABEL.get(dept, dept)}\n"
+        "اكتب الآن مسمّاك الوظيفي ✍️."
+    )
+
 
 async def on_title_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("add_state"): return
