@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: company-bot
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: python bot.py
+    envVars:
+      - key: TOKEN
+        sync: false
+      - key: USE_WEBHOOK
+        value: "1"
+      - key: WEBHOOK_URL
+        sync: false
