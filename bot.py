@@ -1,8 +1,10 @@
 # bot.py
 # المتطلبات:  python -m pip install -r requirements.txt
-# بيئة التشغيل: TOKEN, ADMIN_USERNAME, WEBHOOK_URL, (اختياري TZ=Asia/Baghdad)
+# بيئة التشغيل: TOKEN, ADMIN_USERNAME, WEBHOOK_URL, (اختياري TZ, WEBHOOK_SECRET, DB_PATH)
+# إن أردت وضع التوكن داخل الكود (غير مُستحب): فكّ التعليق وخطّه بدل "PASTE_TOKEN"
+# TOKEN = "PASTE_TOKEN"
 
-import os, sqlite3, logging, atexit, math, html, asyncio, json
+import os, sqlite3, logging, html
 from typing import Optional, Tuple, List
 from datetime import datetime, timedelta, timezone, time as dtime
 from zoneinfo import ZoneInfo
@@ -33,7 +35,7 @@ if not WEBHOOK_URL or not WEBHOOK_URL.startswith("https://"):
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "hook" + TOKEN.split(":")[0])  # سرّ المسار
 TZ = os.environ.get("TZ", "Asia/Baghdad")
 
-os.environ["TZ"] = TZ  # لأبscheduler والعرض
+os.environ["TZ"] = TZ
 DEPTS = ["solar", "maintenance", "cameras", "networks"]
 DEPT_LABEL = {
     "solar": "🔆 الطاقة الشمسية",
@@ -66,7 +68,6 @@ def _col_exists(table, col):
     return any(r[1]==col for r in cur.execute(f"PRAGMA table_info({table})"))
 
 def migrate():
-    # يضيف الأعمدة الناقصة
     needed = [
         ("dept", "TEXT"),
         ("assignee_chat_id", "INTEGER"),
@@ -131,25 +132,11 @@ def parse_due(s:str)->Optional[int]:
 def esc(s: str) -> str:
     return html.escape(s or "")
 
-def fmt_task_block(tid:int, title:str, status:str, due_text:Optional[str], uname:Optional[str]=None, dept:Optional[str]=None) -> str:
-    who = (f"@{uname}" if uname else (DEPT_LABEL.get(dept, dept) if dept else "—"))
-    when = (due_text.strip() if due_text and due_text.strip() else "—")
-    status_ar = {"assigned":"مُسندة","in_progress":"قيد التنفيذ","late":"متأخرة","done":"مكتملة"}.get(status, status)
-    return (
-        f"<b>#{tid}</b> — {esc(title)}\n"
-        f"👤: {esc(who)}\n"
-        f"⏰: {esc(when)}\n"
-        f"📌: {esc(status_ar)}\n"
-        f"<i>————————————</i>"
-    )
-
-def kb_status(task_id: int) -> InlineKeyboardMarkup:
+def kb_status(task_id:int)->InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 تم الاستلام", callback_data=f"ack:{task_id}")],
-        [
-            InlineKeyboardButton("🚀 قيد التنفيذ", callback_data=f"st:in_progress:{task_id}"),
-            InlineKeyboardButton("🏁 إنهاء المهمة ✅", callback_data=f"st:done:{task_id}")
-        ],
+        [InlineKeyboardButton("🚀 قيد التنفيذ", callback_data=f"st:in_progress:{task_id}"),
+         InlineKeyboardButton("🏁 إنهاء المهمة ✅", callback_data=f"st:done:{task_id}")],
         [InlineKeyboardButton("❗️ تعذّر الإكمال", callback_data=f"reason:{task_id}")]
     ])
 
@@ -185,7 +172,7 @@ def kb_depts(prefix:str)->InlineKeyboardMarkup:
         [[InlineKeyboardButton(DEPT_LABEL[d], callback_data=f"{prefix}:{d}") ] for d in DEPTS]
     )
 
-# ========= كتير من الهاندلرز المختصرة (نفس منطقك السابق) =========
+# ========= إرسال مهمة =========
 async def send_task_msg(ctx, chat_id:int, task_id:int, title:str, due_ts:Optional[int], due_text:Optional[str])->Tuple[bool,str|None]:
     when = (due_text.strip() if (due_text and due_text.strip()) else (human(due_ts) if due_ts else "-"))
     txt = (
@@ -204,59 +191,37 @@ async def send_task_msg(ctx, chat_id:int, task_id:int, title:str, due_ts:Optiona
     except Exception as e:
         log.warning(f"notify {chat_id} other: {e}"); return False, "other"
 
+# ========= هاندلرات =========
 async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     ensure_user(u)
+
+    # المدير أولاً دائماً
+    if is_admin(u):
+        return await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
+
     if is_registered(u.id):
-        if is_admin(u):
-            return await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
         return await update.message.reply_text("🎉 جاهز!\n• /mytasks — مهامك 👀")
+
     await update.message.reply_text(
         f"أهلًا {u.full_name}! 😄 خلّينا نكمّل تسجيلك:\n"
         "1) اختر القسم\n2) اكتب المسمّى الوظيفي\n3) (اختياري) رقم الهاتف"
     )
     await update.message.reply_text("اختر قسمك 👇", reply_markup=dept_buttons())
 
-async def on_reg_buttons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def on_reg_buttons(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-
-    # جرّب نفك بيانات الزر بأمان
-    try:
-        prefix, kind, dept = q.data.split(":", 2)
-    except Exception:
-        await q.answer()
-        return
-
-    # لازم يكون النمط reg:dept:<dept>
-    if prefix != "reg" or kind != "dept" or dept not in DEPTS:
-        await q.answer("اختيار غير صالح.", show_alert=False)
-        return
-
     await q.answer()
 
-    # ثبّت بيانات المستخدم وحدّث الدور (admin/member) حسب ADMIN_USERNAME
-    ensure_user(q.from_user)
+    # لو المدير ضغط أزرار التسجيل خطأ، يرجع لوحة الإدارة
+    if is_admin(q.from_user):
+        ctx.user_data.clear()
+        return await q.message.reply_text("أنت المدير — لوحة الإدارة:", reply_markup=admin_menu_kb())
 
-    # خزّن القسم للمستخدم
-    cur.execute("UPDATE users SET dept=? WHERE chat_id=?", (dept, q.from_user.id))
-    conn.commit()
-
-    # نظّف حالات التسجيل وابدأ طلب المسمّى
-    ctx.user_data.clear()
-    ctx.user_data["awaiting_title"] = True
-
-    # اشطب أزرار الاختيار حتى ما تتكرر الضغطات
-    try:
-        await q.edit_message_reply_markup(reply_markup=None)
-    except BadRequest:
-        pass
-
-    # أرسل التعليمات التالية
-    await q.message.reply_text(
-        f"✅ اخترت: {DEPT_LABEL.get(dept, dept)}\n"
-        "اكتب الآن مسمّاك الوظيفي ✍️."
-    )
-
+    _,_,dept = q.data.split(":")
+    cur.execute("UPDATE users SET dept=? WHERE chat_id=?", (dept, q.from_user.id)); conn.commit()
+    await q.message.reply_text(f"✅ اخترت: {DEPT_LABEL[dept]}\nاكتب الآن مسمّاك الوظيفي.")
+    ctx.user_data["awaiting_title"]=True
 
 async def on_title_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("add_state"): return
@@ -298,9 +263,6 @@ async def mytasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         when = (txt.strip() if (txt and txt.strip()) else (human(ts) if ts else "-"))
         lines.append(f"#{i} • {t} • {when} • حالة: {st}")
     await update.message.reply_text("🔸 مهامك غير المكتملة:\n" + "\n".join(lines))
-
-# … (باقي الهاندلرز الأساسية: إضافة مهمة للموظف/قسم، أزرار ack/st/reason، أوامر admin …)
-# اختصارًا، سنضيف أهم ما تحتاجه للتشغيل الكامل:
 
 async def add_start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
@@ -429,7 +391,7 @@ async def on_status(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             admin=get_admin_chat_id()
             if admin:
                 who = f"@{q.from_user.username}" if q.from_user.username else q.from_user.full_name
-                try: await ctx.bot.send_message(admin, f"🎉 تم إكمال المهمة بنجاح يا سيدنا 👑\nمن {who} — #{sid}")
+                try: await ctx.bot.send_message(admin, f"🎉 تم إكمال المهمة بنجاح\nمن {who} — #{sid}")
                 except: pass
         else:
             nice = "🚀 بدأت الشغل، موفق!" if status=="in_progress" else "👌 تم التحديث."
@@ -481,7 +443,6 @@ async def on_reason_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         log.exception("reason save failed")
         await update.message.reply_text("⚠️ لم أستطع حفظ السبب، حاول ثانية.")
 
-# ==== بعض أوامر المدير النصية المختصرة (تقدر توسع لاحقًا) ====
 async def alltasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user): return
     rows = cur.execute("""SELECT t.id,t.title,t.status,t.due_text,t.assignee_chat_id,t.dept,u.username
@@ -496,7 +457,12 @@ async def alltasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         out.append(f"#{i} • {t} • {who} • {st} • {when}")
     await update.message.reply_text("📋 كل المهام (أحدث 200)\n" + "\n".join(out))
 
-# ========= بناء التطبيق (الهاندلرز) =========
+async def admin_menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return await update.message.reply_text("هذا الأمر للمدير فقط 🙅‍♂️.")
+    await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
+
+# ========= بناء التطبيق =========
 def build_application() -> Application:
     app = Application.builder().token(TOKEN).updater(None).build()  # Updater=None للويبهوك
     # تسجيل/بدء
@@ -516,18 +482,19 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_reason_text))
     # مدير نصي بسيط
     app.add_handler(CommandHandler("alltasks", alltasks))
-    # تقرير يومي (لو job-queue متاح)
+    app.add_handler(CommandHandler("menu", admin_menu_cmd))
+
+    # تقرير يومي إن توفّر الـ job-queue (موجود ضمن extra)
     if app.job_queue:
         app.job_queue.run_daily(
             lambda ctx: ctx.application.create_task(_daily_wrapper(ctx)),
             time=dtime(hour=23, minute=30, tzinfo=ZoneInfo(TZ)),
         )
     else:
-        log.warning('JobQueue غير متوفر؛ ثبت الإضافة: python -m pip install "python-telegram-bot[job-queue]==22.5"')
+        log.warning('JobQueue غير متوفر؛ ثبّت الإضافة: python -m pip install "python-telegram-bot[job-queue]==22.5"')
     return app
 
 async def _daily_wrapper(ctx):
-    # رسالة يومية مختصرة
     admin = get_admin_chat_id()
     if not admin: return
     today = datetime.now(ZoneInfo(TZ)).date().isoformat()
@@ -542,7 +509,6 @@ api = FastAPI()
 @api.on_event("startup")
 async def _on_startup():
     await application.initialize()
-    # اضبط الويبهوك
     url = f"{WEBHOOK_URL.rstrip('/')}/{WEBHOOK_SECRET}"
     await application.bot.set_webhook(url)
     log.info(f"Webhook set to: {url}")
@@ -562,12 +528,10 @@ async def telegram_webhook(secret: str, request: Request):
     await application.update_queue.put(update)
     return {"ok": True}
 
-# نقطة فحص صحّة
 @api.get("/")
 def root():
     return {"ok": True, "service": "company_bot", "mode": "webhook"}
 
 if __name__ == "__main__":
-    # تشغيل محليًا للتجربة (لازم ngrok أو Cloudflared مع WEBHOOK_URL صحيح)
     port = int(os.environ.get("PORT", "10000"))
     uvicorn.run(api, host="0.0.0.0", port=port)
