@@ -143,12 +143,14 @@ def fmt_task_block(tid:int, title:str, status:str, due_text:Optional[str], uname
         f"<i>————————————</i>"
     )
 
-def kb_status(task_id:int)->InlineKeyboardMarkup:
+def kb_status(task_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 تم الاستلام", callback_data=f"ack:{task_id}")],
-        [InlineKeyboardButton("🚀 قيد التنفيذ", callback_data=f"st:in_progress:{task_id}"),
-         InlineKeyboardButton("🏁 إنهاء المهمة ✅", callback_data=f"st:done:{task_id}")],
-        [InlineKeyboardButton(❗️ تعذّر الإكمال", callback_data=f"reason:{task_id}")]
+        [
+            InlineKeyboardButton("🚀 قيد التنفيذ", callback_data=f"st:in_progress:{task_id}"),
+            InlineKeyboardButton("🏁 إنهاء المهمة ✅", callback_data=f"st:done:{task_id}")
+        ],
+        [InlineKeyboardButton("❗️ تعذّر الإكمال", callback_data=f"reason:{task_id}")]
     ])
 
 def admin_menu_kb()->InlineKeyboardMarkup:
