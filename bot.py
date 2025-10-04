@@ -1,8 +1,6 @@
 # bot.py
-# المتطلبات:  python -m pip install -r requirements.txt
-# بيئة التشغيل: TOKEN, ADMIN_USERNAME, WEBHOOK_URL, (اختياري TZ, WEBHOOK_SECRET, DB_PATH)
-# إن أردت وضع التوكن داخل الكود (غير مُستحب): فكّ التعليق وخطّه بدل "PASTE_TOKEN"
-# TOKEN = "PASTE_TOKEN"
+# المتطلبات: python -m pip install -r requirements.txt
+# بيئة Render: TOKEN, ADMIN_USERNAME(بدون @), WEBHOOK_URL, (اختياري WEBHOOK_SECRET, TZ=Asia/Baghdad)
 
 import os, sqlite3, logging, html
 from typing import Optional, Tuple, List
@@ -27,15 +25,18 @@ TOKEN = os.environ.get("TOKEN", "").strip()
 if not TOKEN:
     raise SystemExit("ENV TOKEN مفقود")
 
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "lof99").strip()
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()   # مثال: https://your-service.onrender.com
-if not WEBHOOK_URL or not WEBHOOK_URL.startswith("https://"):
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "").strip()  # بدون @
+if not ADMIN_USERNAME:
+    raise SystemExit("ENV ADMIN_USERNAME مفقود (بدون @)")
+
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
+if not WEBHOOK_URL.startswith("https://"):
     raise SystemExit("ENV WEBHOOK_URL غير مضبوط أو ليس https")
 
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "hook" + TOKEN.split(":")[0])  # سرّ المسار
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", f"hook{TOKEN.split(':')[0]}")
 TZ = os.environ.get("TZ", "Asia/Baghdad")
-
 os.environ["TZ"] = TZ
+
 DEPTS = ["solar", "maintenance", "cameras", "networks"]
 DEPT_LABEL = {
     "solar": "🔆 الطاقة الشمسية",
@@ -44,8 +45,11 @@ DEPT_LABEL = {
     "networks": "🌐 الشبكات",
 }
 
-# ========= لوج =========
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
+# ========= اللوج =========
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO
+)
 log = logging.getLogger("company_bot")
 
 # ========= قاعدة البيانات =========
@@ -132,6 +136,7 @@ def parse_due(s:str)->Optional[int]:
 def esc(s: str) -> str:
     return html.escape(s or "")
 
+# ========= لوحات الأزرار =========
 def kb_status(task_id:int)->InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 تم الاستلام", callback_data=f"ack:{task_id}")],
@@ -147,9 +152,7 @@ def admin_menu_kb()->InlineKeyboardMarkup:
         [InlineKeyboardButton("⏳ غير المنجزة", callback_data="admin:incomplete"),
          InlineKeyboardButton("✅ المنجزة", callback_data="admin:completed")],
         [InlineKeyboardButton("🔔 تذكير غير المنجزة", callback_data="admin:remind_pending"),
-         InlineKeyboardButton("📦 الأرشيف", callback_data="admin:archives")],
-        [InlineKeyboardButton("👥 الموظفون", callback_data="admin:users"),
-         InlineKeyboardButton("🧪 تشخيص سريع", callback_data="admin:diag")],
+         InlineKeyboardButton("👥 الموظفون", callback_data="admin:users")],
         [InlineKeyboardButton("🛠 إدارة مهمة برقم", callback_data="admin:manage")]
     ])
 
@@ -191,18 +194,36 @@ async def send_task_msg(ctx, chat_id:int, task_id:int, title:str, due_ts:Optiona
     except Exception as e:
         log.warning(f"notify {chat_id} other: {e}"); return False, "other"
 
-# ========= هاندلرات =========
+# ========= أوامر سريعة =========
+async def ping(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("pong ✅")
+
+async def whoami(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    ensure_user(u)
+    row = cur.execute("SELECT dept,title,role FROM users WHERE chat_id=?", (u.id,)).fetchone()
+    dept,title,role = (row or (None,None,None))
+    await update.message.reply_text(
+        f"👤 @{u.username or '-'}\n"
+        f"• الاسم: {u.full_name}\n"
+        f"• الصلاحية: {role or 'member'}\n"
+        f"• القسم: {DEPT_LABEL.get(dept, dept) if dept else '—'}\n"
+        f"• المسمّى: {title or '—'}"
+    )
+
+async def show_menu(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return await update.message.reply_text("هذه اللوحة للمدير فقط 🙅‍♂️.")
+    await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
+
+# ========= التسجيل =========
 async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     ensure_user(u)
-
-    # المدير أولاً دائماً
-    if is_admin(u):
-        return await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
-
     if is_registered(u.id):
+        if is_admin(u):
+            return await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
         return await update.message.reply_text("🎉 جاهز!\n• /mytasks — مهامك 👀")
-
     await update.message.reply_text(
         f"أهلًا {u.full_name}! 😄 خلّينا نكمّل تسجيلك:\n"
         "1) اختر القسم\n2) اكتب المسمّى الوظيفي\n3) (اختياري) رقم الهاتف"
@@ -210,24 +231,21 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("اختر قسمك 👇", reply_markup=dept_buttons())
 
 async def on_reg_buttons(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    # لو المدير ضغط أزرار التسجيل خطأ، يرجع لوحة الإدارة
-    if is_admin(q.from_user):
-        ctx.user_data.clear()
-        return await q.message.reply_text("أنت المدير — لوحة الإدارة:", reply_markup=admin_menu_kb())
-
+    q = update.callback_query; await q.answer()
     _,_,dept = q.data.split(":")
     cur.execute("UPDATE users SET dept=? WHERE chat_id=?", (dept, q.from_user.id)); conn.commit()
     await q.message.reply_text(f"✅ اخترت: {DEPT_LABEL[dept]}\nاكتب الآن مسمّاك الوظيفي.")
     ctx.user_data["awaiting_title"]=True
 
 async def on_title_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    if ctx.user_data.get("add_state"): return
-    if not ctx.user_data.get("awaiting_title"): return
+    # لا تعترض تدفق الإضافة أو السبب
+    if ctx.user_data.get("add_state") or ctx.user_data.get("awaiting_reason_for"):
+        return
+    if not ctx.user_data.get("awaiting_title"):
+        return
     title=(update.message.text or "").strip()
-    if len(title)<2: return await update.message.reply_text("اكتب مسمى واضح يا بطل 💪.")
+    if len(title)<2:
+        return await update.message.reply_text("اكتب مسمى واضح يا بطل 💪.")
     cur.execute("UPDATE users SET title=? WHERE chat_id=?", (title, update.effective_user.id)); conn.commit()
     ctx.user_data["awaiting_title"]=False
     kb = ReplyKeyboardMarkup([[KeyboardButton("📱 مشاركة رقم الهاتف", request_contact=True)]],
@@ -251,19 +269,22 @@ async def finish_registration(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎫 تم التفعيل! هذه مهامك الآن 👇", reply_markup=ReplyKeyboardRemove())
     await mytasks(update, ctx)
 
+# ========= مهامي =========
 async def mytasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     rows = cur.execute("""SELECT id,title,status,due_ts,due_text FROM tasks
                           WHERE assignee_chat_id=? AND archived_ts IS NULL AND deleted_ts IS NULL
                             AND status!='done'
                           ORDER BY id ASC""",(uid,)).fetchall()
-    if not rows: return await update.message.reply_text("لا توجد مهام غير مكتملة 🎉.")
+    if not rows:
+        return await update.message.reply_text("لا توجد مهام غير مكتملة 🎉.")
     lines=[]
     for i,t,st,ts,txt in rows:
         when = (txt.strip() if (txt and txt.strip()) else (human(ts) if ts else "-"))
         lines.append(f"#{i} • {t} • {when} • حالة: {st}")
     await update.message.reply_text("🔸 مهامك غير المكتملة:\n" + "\n".join(lines))
 
+# ========= إضافة مهمة =========
 async def add_start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user):
         return await update.message.reply_text("هذا الأمر للمدير فقط 🙅‍♂️.")
@@ -275,12 +296,14 @@ async def add_flow_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not st: return
     txt=(update.message.text or "").strip()
     if st=="title":
+        if len(txt)<2:
+            return await update.message.reply_text("اكتب عنوانًا واضحًا لو سمحت.")
         ctx.user_data["title"]=txt; ctx.user_data["add_state"]="dest"
         return await update.message.reply_text("اختَر وجهة الإسناد:", reply_markup=kb_add_dest())
     if st=="user_wait":
-        if txt in ("لي","إلي","الي"): txt="@me"
+        if txt in ("لي","إلي","الي","إلي","اليّ","اليّ."): txt="@me"
         ctx.user_data["assignee"]=txt; ctx.user_data["add_state"]="due"
-        return await update.message.reply_text("🗓 الموعد (اكتبه نصًا بحرّية):")
+        return await update.message.reply_text("🗓 الموعد (مثل +2d أو 2025-10-10 14:00):")
     if st=="due":
         ctx.user_data["due_str"]=txt
         await update.message.reply_text("⏳ جاري إنشاء المهام وإرسال الإشعارات…")
@@ -318,7 +341,7 @@ async def add_finalize(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             if dest_user.lower()=="@me":
                 chat_id = update.effective_user.id
             elif dest_user.startswith("@"):
-                r = cur.execute("SELECT chat_id FROM users WHERE username LIKE ?", (dest_user[1:],)).fetchone()
+                r = cur.execute("SELECT chat_id FROM users WHERE LOWER(username)=LOWER(?)", (dest_user[1:].lower(),)).fetchone()
                 chat_id = r[0] if r else None
             else:
                 r = cur.execute("SELECT chat_id FROM users WHERE full_name LIKE ?", (f"%{dest_user}%",)).fetchone()
@@ -360,6 +383,7 @@ async def add_finalize(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         log.exception("add_finalize failed")
         await update.message.reply_text(f"❌ خطأ أثناء الإنشاء: {e}")
 
+# ========= أزرار المهمة =========
 async def on_ack(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     try:
@@ -391,7 +415,7 @@ async def on_status(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             admin=get_admin_chat_id()
             if admin:
                 who = f"@{q.from_user.username}" if q.from_user.username else q.from_user.full_name
-                try: await ctx.bot.send_message(admin, f"🎉 تم إكمال المهمة بنجاح\nمن {who} — #{sid}")
+                try: await ctx.bot.send_message(admin, f"🎉 تم إكمال المهمة بنجاح من {who} — #{sid}")
                 except: pass
         else:
             nice = "🚀 بدأت الشغل، موفق!" if status=="in_progress" else "👌 تم التحديث."
@@ -443,13 +467,101 @@ async def on_reason_text(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         log.exception("reason save failed")
         await update.message.reply_text("⚠️ لم أستطع حفظ السبب، حاول ثانية.")
 
+# ========= لوحة المدير (admin:*) =========
+async def on_admin_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user):
+        return await q.message.reply_text("هذا الأمر للمدير فقط 🙅‍♂️.")
+
+    _, action = q.data.split(":", 1)
+
+    if action == "add":
+        ctx.user_data.clear()
+        ctx.user_data["add_state"] = "title"
+        return await q.message.reply_text("🎯 عنوان المهمة؟ اكتبها ✍️")
+
+    elif action == "all":
+        rows = cur.execute("""SELECT t.id,t.title,t.status,t.due_text,t.assignee_chat_id,t.dept,u.username
+                              FROM tasks t LEFT JOIN users u ON u.chat_id=t.assignee_chat_id
+                              WHERE t.archived_ts IS NULL AND t.deleted_ts IS NULL
+                              ORDER BY t.id DESC LIMIT 200""").fetchall()
+        if not rows:
+            return await q.message.reply_text("لا توجد مهام بعد.")
+        out=[]
+        for i,t,st,dtxt,aid,dept,uname in rows:
+            who = f"@{uname}" if uname else (f"dept:{dept}" if dept else "-")
+            when = dtxt.strip() if dtxt else "-"
+            out.append(f"#{i} • {t} • {who} • {st} • {when}")
+        return await q.message.reply_text("📋 كل المهام (أحدث 200)\n" + "\n".join(out))
+
+    elif action == "incomplete":
+        rows = cur.execute("""SELECT t.id,t.title,t.status,t.due_text,t.assignee_chat_id,t.dept,u.username
+                              FROM tasks t LEFT JOIN users u ON u.chat_id=t.assignee_chat_id
+                              WHERE t.status!='done' AND t.deleted_ts IS NULL AND t.archived_ts IS NULL
+                              ORDER BY t.id ASC LIMIT 200""").fetchall()
+        if not rows:
+            return await q.message.reply_text("لا توجد مهام غير مكتملة ✅")
+        out=[]
+        for i,t,st,dtxt,aid,dept,uname in rows:
+            who = f"@{uname}" if uname else (f"dept:{dept}" if dept else "-")
+            when = dtxt.strip() if dtxt else "-"
+            out.append(f"#{i} • {t} • {who} • {st} • {when}")
+        return await q.message.reply_text("⏳ غير المنجزة:\n" + "\n".join(out))
+
+    elif action == "completed":
+        rows = cur.execute("""SELECT t.id,t.title,t.status,t.due_text,t.assignee_chat_id,t.dept,u.username
+                              FROM tasks t LEFT JOIN users u ON u.chat_id=t.assignee_chat_id
+                              WHERE t.status='done' AND t.deleted_ts IS NULL
+                              ORDER BY t.id DESC LIMIT 200""").fetchall()
+        if not rows:
+            return await q.message.reply_text("لا توجد مهام مكتملة بعد.")
+        out=[]
+        for i,t,st,dtxt,aid,dept,uname in rows:
+            who = f"@{uname}" if uname else (f"dept:{dept}" if dept else "-")
+            when = dtxt.strip() if dtxt else "-"
+            out.append(f"#{i} • {t} • {who} • {st} • {when}")
+        return await q.message.reply_text("✅ المنجزة:\n" + "\n".join(out))
+
+    elif action == "remind_pending":
+        rows = cur.execute("""SELECT DISTINCT assignee_chat_id FROM tasks
+                              WHERE status!='done' AND deleted_ts IS NULL AND archived_ts IS NULL
+                              AND assignee_chat_id IS NOT NULL""").fetchall()
+        cnt = 0
+        for (cid,) in rows:
+            try:
+                await ctx.bot.send_message(cid, "🔔 تذكير: لديك مهام غير مكتملة. استخدم /mytasks للاطلاع.")
+                cnt += 1
+            except Exception:
+                pass
+        return await q.message.reply_text(f"تم إرسال التذكير إلى {cnt} موظف.")
+
+    elif action == "users":
+        rows = cur.execute("""SELECT full_name, username, dept, title FROM users ORDER BY full_name""").fetchall()
+        if not rows:
+            return await q.message.reply_text("لا يوجد مستخدمون مسجّلون بعد.")
+        out=[]
+        for f,u,d,t in rows:
+            tag = f"@{u}" if u else "-"
+            out.append(f"{f} ({tag}) • {DEPT_LABEL.get(d,d)} • {t or '-'}")
+        return await q.message.reply_text("👥 الموظفون:\n" + "\n".join(out))
+
+    elif action == "manage":
+        return await q.message.reply_text("أرسل رقم المهمة التي تريد إدارتها (ميزة موسّعة لاحقًا).")
+
+    else:
+        return await q.message.reply_text("أمر غير معروف من لوحة المدير.")
+
+# ==== أمر مدير نصي ====
 async def alltasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user): return
+    if not is_admin(update.effective_user):
+        return
     rows = cur.execute("""SELECT t.id,t.title,t.status,t.due_text,t.assignee_chat_id,t.dept,u.username
                           FROM tasks t LEFT JOIN users u ON u.chat_id=t.assignee_chat_id
                           WHERE t.archived_ts IS NULL AND t.deleted_ts IS NULL
                           ORDER BY t.id DESC LIMIT 200""").fetchall()
-    if not rows: return await update.message.reply_text("لا توجد مهام بعد.")
+    if not rows:
+        return await update.message.reply_text("لا توجد مهام بعد.")
     out=[]
     for i,t,st,dtxt,aid,dept,uname in rows:
         who = f"@{uname}" if uname else (f"dept:{dept}" if dept else "-")
@@ -457,50 +569,57 @@ async def alltasks(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         out.append(f"#{i} • {t} • {who} • {st} • {when}")
     await update.message.reply_text("📋 كل المهام (أحدث 200)\n" + "\n".join(out))
 
-async def admin_menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user):
-        return await update.message.reply_text("هذا الأمر للمدير فقط 🙅‍♂️.")
-    await update.message.reply_text("لوحة الإدارة:", reply_markup=admin_menu_kb())
+# ==== تقرير يومي (اختياري) ====
+async def _daily_wrapper(ctx):
+    admin = get_admin_chat_id()
+    if not admin: return
+    today = datetime.now(ZoneInfo(TZ)).date().isoformat()
+    done_cnt = cur.execute("SELECT COUNT(*) FROM tasks WHERE done_ts IS NOT NULL").fetchone()[0]
+    pend_cnt = cur.execute("""SELECT COUNT(*) FROM tasks 
+                              WHERE status!='done' AND deleted_ts IS NULL AND archived_ts IS NULL""").fetchone()[0]
+    await ctx.bot.send_message(admin, f"🗓 تقرير يومي {today}\n✅ المكتملة: {done_cnt}\n⏳ غير المكتملة: {pend_cnt}")
 
 # ========= بناء التطبيق =========
 def build_application() -> Application:
     app = Application.builder().token(TOKEN).updater(None).build()  # Updater=None للويبهوك
-    # تسجيل/بدء
+
+    # أوامر عامة
+    app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("skip", skip_phone))
+
+    # تسجيل
     app.add_handler(CallbackQueryHandler(on_reg_buttons, pattern=r"^reg:dept:"))
     app.add_handler(MessageHandler(filters.CONTACT, on_contact))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_title_text), group=0)
+
     # لوحة المدير + إضافة
+    app.add_handler(CallbackQueryHandler(on_admin_menu, pattern=r"^admin:"))
     app.add_handler(CommandHandler("add", add_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_flow_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_flow_text), group=1)
     app.add_handler(CallbackQueryHandler(add_flow_buttons, pattern=r"^add:"))
+
     # الموظف
     app.add_handler(CommandHandler("mytasks", mytasks))
     app.add_handler(CallbackQueryHandler(on_ack, pattern=r"^ack:\d+$"))
     app.add_handler(CallbackQueryHandler(on_status, pattern=r"^st:"))
     app.add_handler(CallbackQueryHandler(on_reason_button, pattern=r"^reason:\d+$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_reason_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_reason_text), group=2)
+
     # مدير نصي بسيط
     app.add_handler(CommandHandler("alltasks", alltasks))
-    app.add_handler(CommandHandler("menu", admin_menu_cmd))
 
-    # تقرير يومي إن توفّر الـ job-queue (موجود ضمن extra)
+    # JobQueue
     if app.job_queue:
         app.job_queue.run_daily(
             lambda ctx: ctx.application.create_task(_daily_wrapper(ctx)),
             time=dtime(hour=23, minute=30, tzinfo=ZoneInfo(TZ)),
         )
     else:
-        log.warning('JobQueue غير متوفر؛ ثبّت الإضافة: python -m pip install "python-telegram-bot[job-queue]==22.5"')
+        log.warning('JobQueue غير متوفر؛ ثبّت الإضافة: python-telegram-bot[job-queue]==22.5')
     return app
-
-async def _daily_wrapper(ctx):
-    admin = get_admin_chat_id()
-    if not admin: return
-    today = datetime.now(ZoneInfo(TZ)).date().isoformat()
-    done_cnt = cur.execute("SELECT COUNT(*) FROM tasks WHERE done_ts IS NOT NULL").fetchone()[0]
-    pend_cnt = cur.execute("SELECT COUNT(*) FROM tasks WHERE status!='done' AND deleted_ts IS NULL AND archived_ts IS NULL").fetchone()[0]
-    await ctx.bot.send_message(admin, f"🗓 تقرير يومي {today}\n✅ المكتملة: {done_cnt}\n⏳ غير المكتملة: {pend_cnt}")
 
 # ========= FastAPI + Webhook =========
 application = build_application()
@@ -535,3 +654,4 @@ def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     uvicorn.run(api, host="0.0.0.0", port=port)
+
