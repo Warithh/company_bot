@@ -1,19 +1,20 @@
 import os
-from flask import Flask, request
+from fastapi import FastAPI, Request
 import telegram
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 bot = telegram.Bot(token=TOKEN)
-app = Flask(__name__)
+app = FastAPI()
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is running", 200
+@app.get("/")
+async def root():
+    return {"status": "Bot is running"}
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = telegram.Update.de_json(data, bot)
 
     if update.message and update.message.text:
         chat_id = update.message.chat.id
@@ -21,11 +22,7 @@ def webhook():
 
         bot.send_message(
             chat_id=chat_id,
-            text=f"📩 وصلني سؤالك:\n{text}\n\n🤖 البوت يعمل 24/7"
+            text=f"🤖 البوت يعمل 24/7\n\n📩 رسالتك:\n{text}"
         )
 
-    return "OK", 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    return {"ok": True}
