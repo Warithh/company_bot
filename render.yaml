@@ -1,20 +1,7 @@
 services:
   - type: web
-    name: company_bot
+    name: company-bot
     env: python
     plan: free
-    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn bot:api --host 0.0.0.0 --port $PORT
-    autoDeploy: true
-    envVars:
-      - key: TOKEN
-        sync: false        # ضعه يدويًا من لوحة Render
-      - key: ADMIN_USERNAME
-        value: lof99
-      - key: WEBHOOK_URL
-        value: https://company-bot.onrender.com
-      - key: WEBHOOK_SECRET
-        value: c05db6b6a5618f13266f60731c3bc3bd
-      - key: TZ
-        value: Asia/Baghdad
+    startCommand: uvicorn bot:app --host 0.0.0.0 --port 10000
